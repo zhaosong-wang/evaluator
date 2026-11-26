@@ -1,62 +1,30 @@
-# Extra-object evaluator (Topic 1, Group 6)
+# Extra-object evaluator v7 (Topic 1, Group 6)
 
-Counts **extra objects**: objects the model drew in addition to the requested ones.
-It uses the same GroundingDINO and settings as MIG-Bench (box threshold 0.25, NMS 0.5).
-MIG-Bench keeps only the best detection per requested box. This tool labels all the other detections.
+Counts extra objects in generated COCO-Position images, on top of the official MIG-Bench score.
+Same GroundingDINO and settings as MIG-Bench.
 
-Rule design: Ilyas. Code and tests: written with Claude (AI assistant) from that rule.
-
-## The rule (per object type, e.g. "chair")
-R = requested box from the prompt, d = one GroundingDINO detection.
-
-1. **Pair one d per R (one-to-one)**
-   - Try 1: IoU(R, d) >= 0.5, highest IoU first -> `wanted`
-   - Try 2 (object drawn too small): IoA(d, R) >= 0.5 -> `wanted_try2`
-   - R with no pair -> `missing`
-2. **Label each unpaired d (first match wins)**
-   1. IoU >= 0.5 with a requested box of ANOTHER type, or inside R with a higher score than R's pair -> `check` (not counted)
-   2. score < 0.35 -> `extra_lowconf`
-   3. area < 1% of the image -> `extra_small`
-   4. IoA(d, R) >= 0.5 -> `extra_inside`, else `extra_outside`
-
-IoU(R, d) = overlap / (R + d - overlap). IoA(d, R) = overlap / area of d (order matters).
-
-**Metrics** (summary.json):
-- recall = wanted / requested
-- precision_confirmed = wanted / (wanted + extra_inside + extra_outside)
-- precision_all = wanted / (wanted + extras + lowconf + small)
-
-Limit: a lower bound. NMS merges stacked objects of one type, and doubtful cases go to `check`.
-
-## Setup (Lichtenberg)
-Needs the MIG-Bench env (`mig`) with GroundingDINO working (see MIG-Bench setup).
-Copy all files into `ConsistCompose/eval/MIG_Bench/`, then:
-
-```bash
-conda activate mig
-python -m pytest test_count_extras.py -q     # expect: 15 passed
-```
+## Setup
+1. Put the 4 files into `ConsistCompose/eval/MIG_Bench/`.
+2. Activate the env you use for MIG-Bench scoring, then run `python -m pytest test_count_extras.py -q` (expect 29 passed).
+3. In `extras_main.sbatch`, change `S=` and the `#SBATCH -o` path to your own scratch folder, and the `source ... activate` line to your env.
 
 ## Run
-```bash
-sbatch extras.sbatch                   # all 800 COCO-Position images (GPU, ~15 min)
-sbatch extras.sbatch 182,202,208,211   # only these images (quick test)
-```
-Edit paths in `extras.sbatch` if your env or folders differ (`source ~/miniforge3/bin/activate mig`).
+    sbatch extras_main.sbatch <image_dir> <name>          # all 800 images, ~15 min
+    sbatch extras_main.sbatch <image_dir> <name> 202,208  # quick test
+Results: `$S/extras_<name>/summary.json` (starts with `main_metric`), `per_image.csv`, `per_detection.csv`, `vis/`.
+The log ends with one `MAIN METRIC` line.
 
-Re-apply the rules without GPU (after changing thresholds):
-```bash
-python count_extras.py --coco_path ../data/coco_position.jsonl --gen_dir ../result/coco_position/ \
-  --out_dir ../result/extras_new/ --from_csv ../result/extras_baseline/per_detection.csv --no_draw
-```
+## Main metric
+**extra_outside per image** = confirmed extras of the requested types, outside all their boxes. Baseline: **0.537** (lower is better).
+Also: precision_outside = wanted / (wanted + extra_outside) (baseline 0.876), recall = wanted / requested (baseline 0.953, must not drop).
+mIoU and AP from the official MIG-Bench score should stay about the same (baseline 85.17 / 70.96).
 
-Outputs in `--out_dir`: `summary.json`, `per_image.csv`, `per_detection.csv`, `review_list.csv`, `vis/`.
+## Labels (R = requested box, d = detection, s = score)
+Pairing (one d per R, highest IoU first): try 1 IoU(R,d) >= 0.5; try 2 d mostly inside R; try 3 d covers most of R -> wanted. R without pair -> missing.
+Leftover d, first match wins: check (looks like another requested object, not counted) -> same_object (covers an already paired R, not counted)
+-> lowconf (s < 0.35) -> small (< 1% of the image) -> extra_inside (mostly inside an R of its type) -> extra_outside.
 
-## Helpers
-- `draw_examples.py --ids 202,208` : meeting pictures with the exact GroundingDINO boxes (T = requested, E = extra)
-- `make_check_sheet.py --category outside|inside|check|lowconf|small --n 30` : random sample for manual checking
-- `sort_by_category.py` : sorts images into folders (clean, outside_extra, inside_extra, ...)
-
-## Baseline result (ConsistCompose, 800 images)
-0.76 confirmed extras / image (0.65 outside, 0.11 inside); 39% of images have >= 1; 29% fully clean.
-recall 0.93, precision_confirmed 0.83, precision_all 0.68.
+## Manual check
+    python check_sheet_v6.py --per_det $S/extras_<name>/per_detection.csv --coco_path ../data/coco_position.jsonl \
+        --gen_dir <image_dir> --out_dir $S/check_<name>/ --status extra_outside --n 20
+Label each tile: A real extra, B same object / part / group box, C wrong type / reflection / nothing.
